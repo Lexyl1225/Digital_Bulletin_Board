@@ -1,0 +1,433 @@
+================================================================================
+ WORKPULSE / ENGINEERS BULLETIN BOARD - LINUX DEPLOYMENT GUIDE
+ Target: Debian 12 (bookworm), Tailscale already installed and connected
+ Exposed to the internet via: Tailscale Funnel (no inbound cloud firewall
+ rules needed - see SECTION 6)
+================================================================================
+
+Your machine (from `ip a` / `cat /etc/os-release`):
+  - OS: Debian GNU/Linux 12 (bookworm)
+  - Tailscale interface: tailscale0, IP 100.89.127.22 (already joined a tailnet)
+  - Working directory convention used below: /var/www/bulletin-board
+
+Architecture recap (so the steps below make sense):
+  - Backend: Flask + Flask-SQLAlchemy + SQLite, single process, in app.py
+  - Frontend: React/TypeScript built by Vite into frontend/dist/ (static files)
+  - In production Flask serves BOTH: the API endpoints (/users, /login,
+    /logout, /me, ...) AND the built frontend's static files, from the same
+    process on the same port. There is no separate frontend server in
+    production - the Vite dev server (npm run dev) is a DEV-ONLY tool.
+  - Tailscale Funnel terminates HTTPS for you and forwards to that one local
+    port. You do not need nginx, certbot, or any TLS setup of your own.
+
+--------------------------------------------------------------------------------
+SECTION 0 - BEFORE YOU START: two bugs I fixed in this codebase for you
+--------------------------------------------------------------------------------
+While preparing this guide I found and fixed two things that would have
+broken a fresh deployment. Both are already fixed in the code you have now:
+
+  1. requirements.txt was corrupted (saved as UTF-16, which pip cannot read).
+     It's now a clean UTF-8 file with exactly the packages this app uses,
+     plus gunicorn (the production server this guide uses instead of the
+     Flask dev server).
+
+  2. app.py's "/" route had its frontend-serving code commented out, so
+     visiting the site would show a bare JSON status message instead of the
+     actual app. This is now active - Flask serves frontend/dist/index.html
+     at "/" once you've built the frontend (Section 3).
+
+If you're deploying from a different copy of this code (e.g. you copy the
+project instead of pulling the latest version), check app.py's index()
+function and requirements.txt match what's described in Section 3/4 below.
+
+--------------------------------------------------------------------------------
+SECTION 1 - SYSTEM PACKAGES
+--------------------------------------------------------------------------------
+Run as your normal user with sudo (do not run the app itself as root - see
+Section 5 for why).
+
+  sudo apt update
+  sudo apt install -y python3 python3-venv python3-pip git curl
+
+Node.js: Debian 12's default `apt` package (nodejs 18.x) is old enough that
+it may not satisfy this frontend's toolchain (Vite 8 / React 19). Install a
+current LTS via NodeSource instead of the Debian package:
+
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  sudo apt install -y nodejs
+
+  node -v      # expect v20.x
+  npm -v
+
+--------------------------------------------------------------------------------
+SECTION 2 - GET THE CODE ONTO THE SERVER
+--------------------------------------------------------------------------------
+Pick whichever of these matches how you manage the code:
+
+  Option A - you have it in a git repo (recommended going forward):
+    sudo mkdir -p /var/www
+    sudo chown "$USER":"$USER" /var/www
+    git clone <your-repo-url> /var/www/bulletin-board
+
+  Option B - copy straight from your Windows machine (no git needed):
+    From Windows PowerShell, using the Tailscale IP or hostname of this
+    Linux box (find it here with `tailscale status`):
+      scp -r D:\alex_api_profile alexanderfernandez860@100.89.127.22:/var/www/bulletin-board
+
+    (If scp isn't available on Windows, zip the folder and use
+    `tailscale file cp` or any file transfer tool over the tailnet - the
+    tailnet link is already private and encrypted, so this is safe.)
+
+Either way, DO NOT copy these directories over - they're machine-specific
+and will be recreated automatically:
+  - .venv / .venv-linux      (Python virtual environments)
+  - frontend/node_modules    (npm dependencies)
+  - frontend/dist            (build output - you'll rebuild it, Section 3)
+  - instance/                (contains the live SQLite database - see the
+                              warning in Section 8 if you're migrating real
+                              user data, not just the code)
+
+From here on, this guide assumes the project lives at:
+  /var/www/bulletin-board
+
+--------------------------------------------------------------------------------
+SECTION 3 - BUILD THE FRONTEND
+--------------------------------------------------------------------------------
+  cd /var/www/bulletin-board/frontend
+  npm ci
+  npm run build
+
+This runs `tsc -b && vite build` and produces frontend/dist/. Verify it
+worked:
+  ls dist/          # should show index.html, assets/, favicon.svg, icons.svg
+
+--------------------------------------------------------------------------------
+SECTION 4 - BACKEND: VIRTUAL ENVIRONMENT + DEPENDENCIES
+--------------------------------------------------------------------------------
+  cd /var/www/bulletin-board
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install --upgrade pip
+  pip install -r requirements.txt
+
+Quick sanity check that the app imports cleanly and the database gets
+created (Flask-SQLAlchemy auto-creates instance/alex_prod.db on first run,
+with the current schema - users table with gender/is_admin columns, plus
+the sessions table):
+  python -c "import app; print('OK, tables ready')"
+
+  ls instance/       # should now show alex_prod.db
+
+Deactivate for now - the systemd service in Section 5 will point directly
+at this venv's Python, so you don't need to keep it "activated":
+  deactivate
+
+--------------------------------------------------------------------------------
+SECTION 5 - RUN IT WITH GUNICORN, MANAGED BY SYSTEMD
+--------------------------------------------------------------------------------
+Do NOT run this in production with `python app.py`. That starts Flask's
+built-in development server with debug=True, which:
+  (a) is single-threaded and not meant for real traffic, and
+  (b) exposes Werkzeug's interactive debugger - if any unhandled exception
+      ever occurs, a visitor could get a live Python console with your
+      app's full permissions. This is a real remote-code-execution risk on
+      a publicly-funneled server, not a theoretical one.
+
+Gunicorn is the production WSGI server, and running it under systemd means
+it survives reboots and restarts automatically if it ever crashes.
+
+One worker process, threaded, is the right choice for this app - it uses
+SQLite, which only safely supports one writer at a time. Multiple gunicorn
+*worker processes* would each open their own connection and could collide
+under concurrent writes; a single process with multiple *threads* avoids
+that while still handling several requests at once. This is plenty for a
+small team's bulletin board. (If you ever outgrow SQLite, migrating to
+Postgres is the natural next step - that's a separate, bigger change.)
+
+Create the systemd unit:
+
+  sudo nano /etc/systemd/system/bulletin-board.service
+
+Paste this in (adjust the User= line if you deploy as a different account):
+
+  [Unit]
+  Description=WorkPulse Bulletin Board (Flask + Gunicorn)
+  After=network.target
+
+  [Service]
+  Type=simple
+  User=alexanderfernandez860
+  Group=alexanderfernandez860
+  WorkingDirectory=/var/www/bulletin-board
+  Environment="PATH=/var/www/bulletin-board/.venv/bin"
+  Environment="DEFAULT_USER_PASSWORD=<your chosen default password>"
+  # EXTRA_TRUSTED_ORIGIN_HOSTS goes here too, once you know this box's
+  # funnel hostname from Section 6 - see Section 7.
+  ExecStart=/var/www/bulletin-board/.venv/bin/gunicorn \
+      --workers 1 \
+      --threads 4 \
+      --bind 127.0.0.1:8000 \
+      --access-logfile /var/www/bulletin-board/access.log \
+      --error-logfile /var/www/bulletin-board/error.log \
+      app:app
+  Restart=on-failure
+  RestartSec=3
+
+  [Install]
+  WantedBy=multi-user.target
+
+Notes on that file:
+  - --bind 127.0.0.1:8000 - bound to localhost ONLY, not 0.0.0.0. Nothing
+    outside this machine can reach port 8000 directly; Tailscale Funnel is
+    the only path in (Section 6). This is the key security control, not a
+    cloud firewall rule.
+  - WorkingDirectory matters: it's what makes app.py's relative paths
+    (frontend/dist, instance/alex_prod.db) resolve correctly.
+
+Enable and start it:
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable bulletin-board
+  sudo systemctl start bulletin-board
+  sudo systemctl status bulletin-board
+
+Verify locally on the box before involving Tailscale at all:
+
+  curl -I http://127.0.0.1:8000/
+  curl -s http://127.0.0.1:8000/users
+
+Both should return HTTP 200. If not, check logs:
+
+  sudo journalctl -u bulletin-board -n 50 --no-pager
+  tail -n 50 /var/www/bulletin-board/error.log
+
+--------------------------------------------------------------------------------
+SECTION 6 - EXPOSE IT WITH TAILSCALE FUNNEL
+--------------------------------------------------------------------------------
+Tailscale is already running on this box (tailscale0 is up). Funnel works by
+having the tailscaled daemon on THIS machine open an outbound connection to
+Tailscale's relay infrastructure - the public internet reaches your app
+through that relay, back down to your local port. This means:
+
+  >>> You do NOT need to open any inbound firewall port on this GCP
+  >>> instance for Funnel to work. Do not add a VPC firewall rule for
+  >>> port 8000 (or any port) for this - it would only weaken security
+  >>> for no benefit, since gunicorn is bound to 127.0.0.1 anyway.
+
+One-time prerequisites (only needed once per tailnet, may already be done
+since you already funnel from your Windows machine):
+  - HTTPS Certificates must be enabled for your tailnet: Tailscale admin
+    console -> DNS -> "Enable HTTPS Certificates".
+  - Funnel must be allowed for this tailnet/node. On a personal tailnet
+    this is on by default; on a business/org tailnet, check the admin
+    console's Funnel settings or your ACL policy for a "funnel" node
+    attribute grant.
+
+Turn on Funnel for this app:
+
+  tailscale funnel 8000
+
+This maps https://<this-machine's-tailnet-name>/  ->  http://127.0.0.1:8000
+Find the exact hostname it's using:
+
+  tailscale status
+  tailscale funnel status
+
+The hostname will look like:
+  https://instance-20260218-005502.<your-tailnet>.ts.net/
+(NOT the same hostname as your Windows machine - "tomsworld" - since that's
+a different device. If you want a specific friendly name instead of the
+GCP instance name, rename this node first with:
+  sudo tailscale set --hostname=your-chosen-name
+then re-run `tailscale funnel 8000`.)
+
+Funnel's config is stored by the tailscaled daemon, not tied to your
+terminal session - you can close your SSH session and it keeps running.
+Confirm anytime with `tailscale funnel status`, and reset with
+`tailscale funnel reset` if you ever need to reconfigure it.
+
+--------------------------------------------------------------------------------
+SECTION 7 - IMPORTANT: keep the CSRF/allowed-host list in sync
+--------------------------------------------------------------------------------
+This app has a same-origin CSRF check (in app.py, TRUSTED_ORIGIN_HOSTS) and
+a Vite dev-server host allow-list (frontend/vite.config.ts,
+server.allowedHosts). Both are driven by environment variables now (not
+hardcoded in source, since this is a version-controlled repo) - neither
+knows about any public hostname until you tell it to via .env.
+
+Once you know this Linux box's real funnel hostname from Section 6, set it
+via environment variable, otherwise logins from THIS box's public URL will
+fail with "Cross-origin request blocked" (the exact error class you'd hit
+on any box, for the same underlying reason - Tailscale Funnel's proxying
+means the Host header Flask sees doesn't always match the Origin header
+the browser sends).
+
+  1. app.py reads EXTRA_TRUSTED_ORIGIN_HOSTS (comma-separated) - set it in
+     this server's .env file (project root, gitignored, never committed):
+
+       DEFAULT_USER_PASSWORD=<your chosen default password>
+       EXTRA_TRUSTED_ORIGIN_HOSTS=<this-box's-funnel-hostname>
+
+     (No "https://" prefix, no trailing slash. Multiple hostnames can be
+     comma-separated.) Then restart the service:
+       sudo systemctl restart bulletin-board
+
+     Prefer setting these as real systemd Environment= directives instead
+     of a .env file for a production box - see the ExecStart section of
+     the unit file in Section 5, and add lines like:
+       Environment="DEFAULT_USER_PASSWORD=<your chosen default password>"
+       Environment="EXTRA_TRUSTED_ORIGIN_HOSTS=<this-box's-funnel-hostname>"
+
+  2. frontend/vite.config.ts reads VITE_EXTRA_ALLOWED_HOST from
+     frontend/.env (also gitignored) - only matters if you ever run
+     `npm run dev` on this box and access it directly through Funnel
+     instead of through the production build. For the systemd/gunicorn
+     setup in this guide, this file is NOT used in production, so you can
+     skip it unless you also plan to do live dev work on this box.
+
+This app already has ProxyFix configured (trusts one hop of
+X-Forwarded-Host / X-Forwarded-Proto), which handles this automatically IF
+Tailscale forwards those headers. EXTRA_TRUSTED_ORIGIN_HOSTS above is the
+guaranteed fallback regardless - keep it updated when the public hostname
+changes.
+
+--------------------------------------------------------------------------------
+SECTION 8 - FIRST-RUN VERIFICATION CHECKLIST
+--------------------------------------------------------------------------------
+From your own laptop/phone (NOT this server), visit:
+  https://<this-box's-funnel-hostname>/
+
+  [ ] The actual app loads (not a bare JSON message, not a Vite error page)
+  [ ] Registering a new test account works
+  [ ] Logging in with that test account works
+  [ ] Logging out works
+  [ ] An unauthenticated request to the API is rejected:
+        curl -i https://<hostname>/me
+      -> expect HTTP 401
+  [ ] A non-admin cannot self-promote (the exact thing session/auth work
+      earlier in this project was built to prevent):
+        curl -i -X PUT https://<hostname>/users/<some-id> \
+          -H "Content-Type: application/json" \
+          -d '{"name":"x","gender":"x","description":"{\"isAdmin\":true}"}'
+      -> expect HTTP 401 (no session cookie sent)
+
+If anything fails, check Section 9 (Troubleshooting) before changing code.
+
+--------------------------------------------------------------------------------
+SECTION 9 - TROUBLESHOOTING
+--------------------------------------------------------------------------------
+"Cross-origin request blocked" on login/register/any POST-PUT-DELETE:
+  -> Your funnel hostname isn't in EXTRA_TRUSTED_ORIGIN_HOSTS (.env or
+     systemd Environment=). See Section 7. Restart the service after
+     editing.
+
+"Field 'gender' is required" on registration:
+  -> Means you're hitting an OLD/mismatched copy of app.py or the frontend
+     build is stale. Re-run `npm run build` (Section 3) and make sure the
+     systemd service's WorkingDirectory points at the same checkout you
+     just built.
+
+Site loads but shows raw JSON ({"message":"Flask API is running"...})
+instead of the app:
+  -> frontend/dist/index.html doesn't exist yet (build didn't run or ran in
+     the wrong directory), or you're running an app.py copy that still has
+     the "/" route commented out (Section 0). Run:
+       ls /var/www/bulletin-board/frontend/dist/index.html
+     If missing, redo Section 3.
+
+502/connection refused via the funnel URL, but curl to 127.0.0.1:8000
+works fine locally on the box:
+  -> gunicorn isn't running or crashed. Check:
+       sudo systemctl status bulletin-board
+       sudo journalctl -u bulletin-board -n 100 --no-pager
+
+Login works but you get logged out unexpectedly / cookie doesn't persist:
+  -> Check the browser's dev tools -> Application -> Cookies for
+     "session_token". If it's missing entirely, the Set-Cookie header may
+     be getting dropped somewhere - confirm you're accessing the site over
+     the https:// funnel URL (not a mismatched http:// URL), since the
+     cookie may end up marked Secure depending on how Tailscale forwards
+     the request scheme.
+
+"database is locked" errors under load:
+  -> You changed --workers to more than 1 in the systemd unit. SQLite
+     supports one writer at a time; keep --workers 1 --threads 4 (Section
+     5), or migrate to Postgres if you genuinely need more write
+     throughput than one process provides.
+
+--------------------------------------------------------------------------------
+SECTION 10 - BACKING UP THE DATABASE
+--------------------------------------------------------------------------------
+Everything - every user, post, and password hash - lives in one file:
+  /var/www/bulletin-board/instance/alex_prod.db
+
+Back it up before any redeploy that touches the schema, and periodically in
+general. It's safe to copy while the app is running (SQLite handles this),
+though for extra safety you can briefly stop the service first:
+
+  sudo systemctl stop bulletin-board
+  cp /var/www/bulletin-board/instance/alex_prod.db \
+     ~/backups/alex_prod-$(date +%Y%m%d-%H%M%S).db
+  sudo systemctl start bulletin-board
+
+Consider a daily cron job doing the same `cp` line if this app holds real
+data you care about keeping.
+
+--------------------------------------------------------------------------------
+SECTION 11 - REDEPLOYING AFTER A CODE CHANGE
+--------------------------------------------------------------------------------
+  cd /var/www/bulletin-board
+  git pull                          # or re-copy changed files (Section 2)
+
+  # Backend dependency changes, if any:
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  deactivate
+
+  # Frontend changes:
+  cd frontend
+  npm ci
+  npm run build
+  cd ..
+
+  # Restart the service to pick up backend AND frontend changes:
+  sudo systemctl restart bulletin-board
+  sudo systemctl status bulletin-board
+
+If you changed app.py's User/Session models, back up the database first
+(Section 10) - Flask-SQLAlchemy's db.create_all() only creates MISSING
+tables, it never alters existing ones, so a new column needs a manual
+migration (see how the "gender" and "is_admin" columns were added earlier
+in this project's history for the pattern: ALTER TABLE ... ADD COLUMN,
+then backfill, done once via a small Python script against the .db file
+directly, with the service stopped).
+
+--------------------------------------------------------------------------------
+SECTION 12 - SECURITY POSTURE SUMMARY (what's already protecting you)
+--------------------------------------------------------------------------------
+This is a recap, not new setup - all of this is already built into app.py:
+
+  - Passwords are hashed (Werkzeug scrypt), never stored or returned in
+    the clear.
+  - Login is verified server-side (POST /login); the frontend never
+    decides who's authenticated on its own.
+  - Sessions are opaque server-side tokens in an httpOnly cookie - not
+    readable by JavaScript, not forgeable by editing localStorage.
+  - "isAdmin" is a protected database column. No generic profile-update
+    request can change it - only the dedicated, admin-only
+    POST /users/<id>/admin endpoint can, and it refuses to demote the last
+    remaining admin.
+  - Editing or deleting another user's account requires being that user or
+    an admin, enforced server-side (not just hidden in the UI).
+  - A same-origin check blocks state-changing requests whose Origin/
+    Referer doesn't match a trusted host (Section 7).
+  - gunicorn binds to 127.0.0.1 only; Tailscale Funnel is the only public
+    entry point, and it doesn't require any inbound cloud firewall rule.
+
+What this guide adds on top: don't run the Flask debug server in
+production (Section 5), and keep EXTRA_TRUSTED_ORIGIN_HOSTS in sync with
+wherever this app is actually reachable (Section 7).
+
+================================================================================
+END OF GUIDE
+================================================================================
