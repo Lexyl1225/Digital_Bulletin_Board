@@ -62,30 +62,30 @@ current LTS via NodeSource instead of the Debian package:
 --------------------------------------------------------------------------------
 SECTION 2 - GET THE CODE ONTO THE SERVER
 --------------------------------------------------------------------------------
-Pick whichever of these matches how you manage the code:
+The code is on GitHub now, so this is the normal path:
 
-  Option A - you have it in a git repo (recommended going forward):
-    sudo mkdir -p /var/www
-    sudo chown "$USER":"$USER" /var/www
-    git clone <your-repo-url> /var/www/bulletin-board
+  sudo mkdir -p /var/www
+  sudo chown "$USER":"$USER" /var/www
+  git clone https://github.com/Lexyl1225/Digital_Bulletin_Board.git /var/www/bulletin-board
 
-  Option B - copy straight from your Windows machine (no git needed):
-    From Windows PowerShell, using the Tailscale IP or hostname of this
-    Linux box (find it here with `tailscale status`):
-      scp -r D:\alex_api_profile alexanderfernandez860@100.89.127.22:/var/www/bulletin-board
+The repo is public and the clone is read-only, so no GitHub credentials are
+needed on the server for this step. (If you ever make the repo private,
+you'll need either a deploy key or a Personal Access Token here instead.)
 
-    (If scp isn't available on Windows, zip the folder and use
-    `tailscale file cp` or any file transfer tool over the tailnet - the
-    tailnet link is already private and encrypted, so this is safe.)
+To redeploy a code update later, see Section 11 - it's just `git pull`
+from this same directory.
 
-Either way, DO NOT copy these directories over - they're machine-specific
-and will be recreated automatically:
+None of these get cloned - they're gitignored, machine-specific, and
+either get recreated automatically or need to be created fresh below:
   - .venv / .venv-linux      (Python virtual environments)
   - frontend/node_modules    (npm dependencies)
   - frontend/dist            (build output - you'll rebuild it, Section 3)
   - instance/                (contains the live SQLite database - see the
                               warning in Section 8 if you're migrating real
                               user data, not just the code)
+  - .env / frontend/.env     (the default password + trusted hostname -
+                              never committed; you create these fresh on
+                              every machine, Section 4 and Section 7)
 
 From here on, this guide assumes the project lives at:
   /var/www/bulletin-board
@@ -110,10 +110,31 @@ SECTION 4 - BACKEND: VIRTUAL ENVIRONMENT + DEPENDENCIES
   pip install --upgrade pip
   pip install -r requirements.txt
 
+Create the .env file - app.py reads DEFAULT_USER_PASSWORD and
+EXTRA_TRUSTED_ORIGIN_HOSTS from the environment rather than hardcoding
+them (this is a public repo now). This file is gitignored; `git pull`
+later will never touch it.
+
+  cat > /var/www/bulletin-board/.env <<'EOF'
+DEFAULT_USER_PASSWORD=<choose a real default password>
+EOF
+
+Leave EXTRA_TRUSTED_ORIGIN_HOSTS out for now - you don't know this box's
+funnel hostname yet (that's Section 6); you'll add it to this same file in
+Section 7.
+
+If you're migrating an existing instance/alex_prod.db from another
+machine (Section 8) rather than starting fresh, DEFAULT_USER_PASSWORD here
+must match whatever password those existing accounts actually used as
+their shared default - otherwise the "still using the default password"
+nudge banner will be wrong for migrated accounts. It doesn't affect actual
+login (that's the real per-account password hash in the database, checked
+separately) - only that UI nudge.
+
 Quick sanity check that the app imports cleanly and the database gets
 created (Flask-SQLAlchemy auto-creates instance/alex_prod.db on first run,
-with the current schema - users table with gender/is_admin columns, plus
-the sessions table):
+with the current schema - users table with gender/is_admin/is_private
+columns, plus the sessions table):
   python -c "import app; print('OK, tables ready')"
 
   ls instance/       # should now show alex_prod.db
@@ -377,7 +398,7 @@ data you care about keeping.
 SECTION 11 - REDEPLOYING AFTER A CODE CHANGE
 --------------------------------------------------------------------------------
   cd /var/www/bulletin-board
-  git pull                          # or re-copy changed files (Section 2)
+  git pull
 
   # Backend dependency changes, if any:
   source .venv/bin/activate
@@ -419,6 +440,14 @@ This is a recap, not new setup - all of this is already built into app.py:
     remaining admin.
   - Editing or deleting another user's account requires being that user or
     an admin, enforced server-side (not just hidden in the UI).
+  - "isPrivate" accounts (a personal-use board) are excluded from GET
+    /users entirely, 404 on direct GET/PUT by id, and never editable by an
+    admin - enforced server-side, not admin-bypassable like normal
+    accounts. Their archived posts follow the same rule.
+  - Archived posts (per-user "archivedPosts") are stripped from every API
+    response unless the requester is that account's own owner or (for a
+    non-private account) an admin - so a regular team member can't read
+    someone else's archive by hitting the API directly.
   - A same-origin check blocks state-changing requests whose Origin/
     Referer doesn't match a trusted host (Section 7).
   - gunicorn binds to 127.0.0.1 only; Tailscale Funnel is the only public
