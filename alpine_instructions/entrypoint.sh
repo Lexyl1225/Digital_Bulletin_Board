@@ -92,11 +92,9 @@ done
 echo "[entrypoint] Enabling Tailscale Funnel (443 -> 127.0.0.1:8000)..."
 tailscale --socket="$TS_SOCKET" funnel --bg --https=443 http://127.0.0.1:8000
 
-TAILNET_NAME=$(tailscale --socket="$TS_SOCKET" status --json | grep -o '"MagicDNSSuffix":"[^"]*"' | head -1 | cut -d'"' -f4)
 echo "==============================================================="
-echo " The app should now be live at:"
-echo "   https://${TS_HOSTNAME}.${TAILNET_NAME:-<your-tailnet>.ts.net}/"
-echo " Confirm with: tailscale funnel status"
+echo " Funnel configuration (the URL below is where the app is live):"
+tailscale --socket="$TS_SOCKET" funnel status
 echo "==============================================================="
 
 wait "$GUNICORN_PID"
