@@ -1,0 +1,55 @@
+# WorkPulse / Engineers Bulletin Board - Alpine + Tailscale Funnel
+#
+# Run all commands from THIS folder (alpine_instructions/):
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Requires a .env file in this same folder - copy .env.example to .env and
+# fill it in first. See README.md for the full walkthrough.
+
+services:
+  bulletin-board:
+    build:
+      # Build context is the repo root - the Dockerfile needs app.py,
+      # requirements.txt and frontend/ from there, not just this folder.
+      context: ..
+      dockerfile: alpine_instructions/Dockerfile
+      args:
+        VITE_DEFAULT_PASSWORD: ${VITE_DEFAULT_PASSWORD}
+        VITE_EXTRA_ALLOWED_HOST: ${VITE_EXTRA_ALLOWED_HOST}
+    image: bulletin-board-alpine:latest
+    container_name: bulletin-board-alpine
+    restart: unless-stopped
+
+    # Tailscale needs to create/manage its own network interface (tailscale0)
+    # inside the container. If your Docker host can't grant this (rootless
+    # Docker, some managed platforms), set TS_USERSPACE=true in .env instead
+    # of removing these - see README.md's Troubleshooting section.
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_HOSTNAME: ${TS_HOSTNAME:-electrical-bulletin-board}
+      TS_USERSPACE: ${TS_USERSPACE:-false}
+      DEFAULT_USER_PASSWORD: ${DEFAULT_USER_PASSWORD}
+      EXTRA_TRUSTED_ORIGIN_HOSTS: ${EXTRA_TRUSTED_ORIGIN_HOSTS}
+
+    volumes:
+      # Tailscale's node identity/keys - without this, every container
+      # recreate would need to re-authenticate as a brand new device.
+      - tailscale-state:/var/lib/tailscale
+      # The SQLite database (every user, post, and password hash) - without
+      # this, `docker compose down` / a rebuild wipes all app data.
+      - app-db:/app/instance
+
+    # No `ports:` mapping on purpose - the app is bound to 127.0.0.1:8000
+    # INSIDE the container and reachable from the outside world only via
+    # Tailscale Funnel, exactly like the systemd deployment (deployment.txt).
+
+volumes:
+  tailscale-state:
+  app-db:

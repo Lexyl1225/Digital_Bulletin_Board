@@ -1,0 +1,26 @@
+# Keeps the Docker build context small and avoids ever copying
+# machine-specific or secret files into an image.
+
+.git
+.gitignore
+
+# Python
+.venv/
+.venv-linux/
+__pycache__/
+*.pyc
+instance/
+
+# Node / frontend build artifacts (rebuilt fresh inside the image)
+frontend/node_modules/
+frontend/dist/
+
+# Env files - never bake real secrets into an image layer
+.env
+frontend/.env
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.log
+.DS_Store
