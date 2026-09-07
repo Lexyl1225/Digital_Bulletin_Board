@@ -252,6 +252,47 @@ docker cp bulletin-board-alpine:/app/instance/alex_prod.db \
 The second command copies it out onto your Docker host — do this
 periodically if this app holds real data you care about.
 
+**Import an existing database from another deployment** (e.g. migrating
+from the systemd/Debian setup in `deployment.txt`, or another server
+entirely):
+
+1. Get `alex_prod.db` onto this Docker host. If the source server is
+   already on the same tailnet (likely, if you're reading this), you can
+   `scp` straight over Tailscale — no public access or port-forwarding
+   needed:
+   ```bash
+   scp youruser@source-hostname.your-tailnet.ts.net:/path/to/instance/alex_prod.db .
+   ```
+2. Stop the app first, so nothing writes to the database mid-copy:
+   ```bash
+   docker compose stop
+   ```
+3. Copy the file straight into the `app-db` volume using a disposable
+   Alpine container that mounts it — this works whether the app container
+   is running or stopped, and needs no shell access inside it:
+   ```bash
+   docker run --rm \
+     -v alpine_instructions_app-db:/data \
+     -v "$PWD":/backup \
+     alpine cp /backup/alex_prod.db /data/alex_prod.db
+   ```
+   (Volume name may differ — check `docker volume ls`; Compose prefixes it
+   with the project folder name, e.g. `alpine_instructions_app-db`.)
+4. If the migrated accounts' actual shared password differs from this
+   deployment's `DEFAULT_USER_PASSWORD` in `.env`, update `.env` to match —
+   otherwise only the "using default password" UI nudge banner will be
+   wrong for those accounts (their real login still works either way,
+   since that's checked against the actual per-account password hash
+   already in the database, not this env var).
+5. Restart and verify:
+   ```bash
+   docker compose up -d
+   docker compose logs -f
+   curl -s https://electrical-bulletin-board.ratfish-regulus.ts.net/users
+   ```
+   The last command should list the real migrated usernames instead of
+   an empty `[]`.
+
 **Fully wipe and start over** (deletes the database AND de-registers this
 node from your tailnet — you'll need to re-authenticate per Section 5
 afterward):
