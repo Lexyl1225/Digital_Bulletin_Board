@@ -138,7 +138,7 @@ export const LoginFormModal: React.FC<LoginFormModalProps> = ({
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: '520px', borderRadius: '20px', overflow: 'hidden' }}
+        style={{ maxWidth: '520px', borderRadius: '20px', overflow: 'hidden auto' }}
       >
         {/* Top Header */}
         <div

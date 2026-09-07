@@ -294,6 +294,25 @@ a:focus-visible {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+/* Responsive Navbar: hamburger menu below 860px */
+.navbar-hamburger-btn {
+  display: none;
+}
+.navbar-mobile-menu {
+  display: none !important;
+}
+@media (max-width: 860px) {
+  .navbar-desktop-group {
+    display: none !important;
+  }
+  .navbar-hamburger-btn {
+    display: inline-flex !important;
+  }
+  .navbar-mobile-menu {
+    display: flex !important;
+  }
+}
+
 /* Skeleton Loading */
 .skeleton {
   background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-tertiary) 50%, var(--bg-secondary) 75%);

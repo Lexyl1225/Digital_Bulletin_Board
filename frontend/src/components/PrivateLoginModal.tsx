@@ -115,7 +115,7 @@ export const PrivateLoginModal: React.FC<PrivateLoginModalProps> = ({
       <div
         className="modal-content"
         onClick={(e) => e.stopPropagation()}
-        style={{ maxWidth: '460px', borderRadius: '20px', overflow: 'hidden' }}
+        style={{ maxWidth: '460px', borderRadius: '20px', overflow: 'hidden auto' }}
       >
         {/* Header */}
         <div

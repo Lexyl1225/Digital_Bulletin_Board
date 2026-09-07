@@ -58,7 +58,7 @@ export const App: React.FC = () => {
   // View & Layout State
   const [viewMode, setViewMode] = useState<ViewMode>('board');
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('grid');
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>('light');
 
   // Modals
   const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(false);
@@ -242,6 +242,9 @@ export const App: React.FC = () => {
   ) => {
     const newUser = await createNewUser(name, bio, role, password, gender, department, avatarColor);
     addToast('success', `Account created successfully! Signed in as ${name}.`);
+    setActiveUser(newUser);
+    setViewingUserId(newUser.id);
+    localStorage.setItem('viewingUserId', String(newUser.id));
     await loadUsers(newUser.id);
 
     if (pendingAction) {

@@ -14,6 +14,13 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       allowedHosts: extraAllowedHost ? [extraAllowedHost] : undefined,
+      // This repo lives on a WSL-mounted Windows drive — native file-system
+      // events aren't reliable there, so Vite/chokidar can miss edits and
+      // keep serving a stale bundle. Polling guarantees changes are picked up.
+      watch: {
+        usePolling: true,
+        interval: 300,
+      },
       proxy: {
         '/users': {
           target: 'http://127.0.0.1:5000',
