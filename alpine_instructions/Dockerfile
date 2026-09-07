@@ -46,17 +46,35 @@ FROM alpine:3.20 AS runtime
 # `tailscale` ships in Alpine's community repository. Official alpine:3.20
 # images normally already have it enabled, but uncomment it defensively so
 # this build doesn't silently break on a slimmer base image.
+#
+# apk against dl-cdn.alpinelinux.org occasionally hits a transient
+# "temporary error (try again later)" on fresh hosts (DNS/CDN blip, not a
+# problem with this Dockerfile) - retry a few times with backoff instead of
+# failing the whole build on the first hiccup.
 RUN sed -i -E 's/^#\s*(.*\/community)$/\1/' /etc/apk/repositories \
-    && apk update \
-    && apk add --no-cache \
-        python3 \
-        py3-pip \
-        tailscale \
-        iptables \
-        ip6tables \
-        ca-certificates \
-        curl \
-        bash \
+    && ( for i in 1 2 3 4 5; do \
+           apk update && exit 0; \
+           echo ">>> apk update failed (attempt $i/5), retrying in 5s..."; \
+           sleep 5; \
+         done; \
+         echo ">>> apk update failed after 5 attempts - giving up"; \
+         exit 1 ) \
+    && ( for i in 1 2 3 4 5; do \
+           apk add --no-cache \
+             python3 \
+             py3-pip \
+             tailscale \
+             iptables \
+             ip6tables \
+             ca-certificates \
+             curl \
+             bash \
+           && exit 0; \
+           echo ">>> apk add failed (attempt $i/5), retrying in 5s..."; \
+           sleep 5; \
+         done; \
+         echo ">>> apk add failed after 5 attempts - giving up"; \
+         exit 1 ) \
     && rm -rf /var/cache/apk/*
 
 WORKDIR /app

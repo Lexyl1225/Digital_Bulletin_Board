@@ -287,6 +287,30 @@ build time, so change both together and rebuild.)
 
 ## Section 9 — Troubleshooting
 
+**`docker compose build` fails during `apk update`/`apk add` with
+`temporary error (try again later)` on both `main` and `community`:**
+→ A network/DNS blip reaching `dl-cdn.alpinelinux.org` from your Docker
+host — common on fresh VPS/cloud instances. The `Dockerfile` already
+retries this step 5 times with backoff before giving up, so a truly
+transient blip resolves itself; if it still fails after 5 attempts:
+```bash
+# Confirm the host itself can reach Alpine's CDN:
+curl -I https://dl-cdn.alpinelinux.org/alpine/v3.20/main/x86_64/APKINDEX.tar.gz
+
+# If that also fails/hangs, it's your Docker host's DNS, not Alpine's CDN.
+# Check what DNS the daemon is actually using containers with:
+docker run --rm alpine:3.20 cat /etc/resolv.conf
+
+# If it points at a resolver your containers can't actually reach (common
+# with systemd-resolved's 127.0.0.53 stub), pin real DNS servers for
+# Docker itself:
+sudo tee /etc/docker/daemon.json <<'EOF'
+{ "dns": ["1.1.1.1", "8.8.8.8"] }
+EOF
+sudo systemctl restart docker
+```
+Then just re-run `docker compose up -d --build`.
+
 **Container exits immediately / `docker compose logs` shows a tailscaled
 error about `/dev/net/tun`:**
 → Your Docker host won't grant the container a real TUN device (common on
